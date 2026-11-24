@@ -11,17 +11,17 @@ import android.view.SurfaceHolder
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 class SnowWallpaperService : WallpaperService() {
-
     override fun onCreateEngine(): Engine = SnowEngine()
 
     inner class SnowEngine : Engine() {
         private val handler = Handler(Looper.getMainLooper())
         private val random = Random(System.nanoTime())
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val particles = ArrayList<SnowParticle>(PARTICLE_COUNT)
+        private val particles = ArrayList<SnowParticle>(MAX_PARTICLES)
 
         private var screenW = 1
         private var screenH = 1
@@ -29,13 +29,20 @@ class SnowWallpaperService : WallpaperService() {
         private var running = false
         private var lastFrame = 0L
 
+        // Compact 2D snow-density field: snow can rest anywhere on the screen.
+        private var columns = 1
+        private var rows = 1
+        private var snow = FloatArray(1)
+        private val cellSize = CELL_SIZE.toFloat()
+
         private var touchActive = false
         private var touchX = 0f
         private var touchY = 0f
-        private var touchDownAt = 0L
         private var previousTouchX = 0f
         private var previousTouchY = 0f
-        private var swirlDirection = 1f
+        private var touchVX = 0f
+        private var touchVY = 0f
+        private var lastTouchAt = 0L
 
         private val frame = object : Runnable {
             override fun run() {
@@ -49,15 +56,11 @@ class SnowWallpaperService : WallpaperService() {
             setTouchEventsEnabled(true)
         }
 
-        override fun onSurfaceChanged(
-            holder: SurfaceHolder,
-            format: Int,
-            width: Int,
-            height: Int
-        ) {
+        override fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
             super.onSurfaceChanged(holder, format, width, height)
             screenW = width.coerceAtLeast(1)
             screenH = height.coerceAtLeast(1)
+            createSnowField()
             createParticles()
             drawFrame()
         }
@@ -90,30 +93,37 @@ class SnowWallpaperService : WallpaperService() {
             handler.removeCallbacks(frame)
         }
 
+        private fun createSnowField() {
+            columns = (screenW / CELL_SIZE + 1).coerceAtLeast(1)
+            rows = (screenH / CELL_SIZE + 1).coerceAtLeast(1)
+            snow = FloatArray(columns * rows) {
+                0.025f + random.nextFloat() * 0.035f
+            }
+        }
+
         private fun createParticles() {
             particles.clear()
-            repeat(PARTICLE_COUNT) {
-                particles.add(newParticle(randomY = true))
-            }
+            repeat(PARTICLE_COUNT) { particles.add(newParticle(true)) }
         }
 
         private fun newParticle(randomY: Boolean): SnowParticle {
             val depth = random.nextFloat()
-            val size = 0.7f + depth * 2.5f
             return SnowParticle(
                 x = random.nextFloat() * screenW,
-                y = if (randomY) random.nextFloat() * screenH else -random.nextFloat() * 80f,
-                vx = (random.nextFloat() - 0.5f) * 12f,
-                vy = 18f + depth * 48f,
-                size = size,
+                y = if (randomY) random.nextFloat() * screenH else -random.nextFloat() * 30f,
+                vx = (random.nextFloat() - 0.5f) * 16f,
+                vy = 20f + depth * 55f,
+                size = 0.8f + depth * 2.4f,
                 depth = depth,
-                phase = random.nextFloat() * (PI.toFloat() * 2f),
+                phase = random.nextFloat() * PI.toFloat() * 2f,
                 rotation = random.nextFloat() * 360f,
-                rotationSpeed = (random.nextFloat() - 0.5f) * 90f
+                rotationSpeed = (random.nextFloat() - 0.5f) * 100f,
+                depositClock = random.nextFloat() * 0.12f
             )
         }
 
         override fun onTouchEvent(event: MotionEvent) {
+            val now = System.currentTimeMillis()
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     touchActive = true
@@ -121,25 +131,20 @@ class SnowWallpaperService : WallpaperService() {
                     touchY = event.y
                     previousTouchX = event.x
                     previousTouchY = event.y
-                    touchDownAt = System.currentTimeMillis()
-                    swirlDirection = 1f
+                    touchVX = 0f
+                    touchVY = 0f
+                    lastTouchAt = now
                 }
-
-                MotionEvent.ACTION_MOVE -> {
-                    if (touchActive) {
-                        val dx = event.x - previousTouchX
-                        val dy = event.y - previousTouchY
-
-                        // Circular movement changes the vortex direction.
-                        if (dx * dy < 0f) swirlDirection = -swirlDirection
-
-                        touchX = event.x
-                        touchY = event.y
-                        previousTouchX = event.x
-                        previousTouchY = event.y
-                    }
+                MotionEvent.ACTION_MOVE -> if (touchActive) {
+                    val elapsed = ((now - lastTouchAt).coerceAtLeast(1L)) / 1000f
+                    touchVX = ((event.x - previousTouchX) / elapsed).coerceIn(-1800f, 1800f)
+                    touchVY = ((event.y - previousTouchY) / elapsed).coerceIn(-1800f, 1800f)
+                    touchX = event.x
+                    touchY = event.y
+                    previousTouchX = event.x
+                    previousTouchY = event.y
+                    lastTouchAt = now
                 }
-
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     touchX = event.x
                     touchY = event.y
@@ -150,27 +155,24 @@ class SnowWallpaperService : WallpaperService() {
         }
 
         private fun drawFrame() {
-            val holder = surfaceHolder
             var canvas: Canvas? = null
-
             try {
-                canvas = holder.lockCanvas()
+                canvas = surfaceHolder.lockCanvas()
                 if (canvas != null) {
                     val now = System.nanoTime()
                     val dt = if (lastFrame == 0L) 0.016f
                     else ((now - lastFrame) / 1_000_000_000f).coerceIn(0.001f, 0.04f)
                     lastFrame = now
-
                     render(canvas, dt)
                 }
             } catch (_: Exception) {
-                // Surface may temporarily be unavailable while Android changes screens.
+                // The wallpaper surface can disappear during screen transitions.
             } finally {
                 if (canvas != null) {
                     try {
-                        holder.unlockCanvasAndPost(canvas)
+                        surfaceHolder.unlockCanvasAndPost(canvas)
                     } catch (_: Exception) {
-                        // Ignore a surface that was destroyed during drawing.
+                        // Ignore a surface destroyed during drawing.
                     }
                 }
             }
@@ -178,115 +180,158 @@ class SnowWallpaperService : WallpaperService() {
 
         private fun render(canvas: Canvas, dt: Float) {
             canvas.drawColor(Color.rgb(5, 12, 27))
-
-            val now = System.currentTimeMillis()
-            val holdAttract = touchActive && now - touchDownAt > HOLD_TO_ATTRACT_MS
-
-            // Subtle depth haze near the bottom.
-            paint.style = Paint.Style.FILL
-            paint.color = Color.argb(16, 80, 125, 170)
-            canvas.drawRect(0f, screenH * 0.72f, screenW.toFloat(), screenH.toFloat(), paint)
-
-            val wind = sin(now / 1900.0).toFloat() * 10f
+            val wind = sin(System.currentTimeMillis() / 1900.0).toFloat() * 9f
 
             for (p in particles) {
                 p.phase += dt * (0.7f + p.depth)
                 p.rotation += p.rotationSpeed * dt
+                p.depositClock += dt
+                p.vx += wind * dt * 0.10f + sin(p.phase) * dt * 2f
+                p.vy += (18f + p.depth * 13f) * dt * 0.035f
 
-                // Natural falling motion and gentle wind.
-                p.vx += wind * dt * 0.10f
-                p.vx += sin(p.phase) * dt * 2.2f
-                p.vy += (22f + p.depth * 15f) * dt * 0.035f
-
-                if (touchActive) {
-                    val dx = touchX - p.x
-                    val dy = touchY - p.y
-                    val distance2 = dx * dx + dy * dy
-                    val radius = screenW * 0.23f
-
-                    if (distance2 < radius * radius && distance2 > 1f) {
-                        val distance = kotlin.math.sqrt(distance2)
-                        val nx = dx / distance
-                        val ny = dy / distance
-                        val force = (1f - distance / radius).coerceIn(0f, 1f)
-
-                        if (holdAttract) {
-                            // Hold finger: pull particles toward the touch point.
-                            p.vx += nx * force * 95f * dt
-                            p.vy += ny * force * 95f * dt
-                        } else {
-                            // Swipe: scatter particles away from the finger.
-                            p.vx -= nx * force * 260f * dt
-                            p.vy -= ny * force * 260f * dt
-                        }
-
-                        // Tangential force gives a swirling effect.
-                        p.vx += (-ny) * force * 55f * swirlDirection * dt
-                        p.vy += nx * force * 55f * swirlDirection * dt
-                    }
+                // Each flake leaves a little powder along its path.
+                if (p.depositClock >= DEPOSIT_INTERVAL) {
+                    addSnow(p.x, p.y, DEPOSIT_AMOUNT * (0.7f + p.depth * 0.6f))
+                    p.depositClock = 0f
                 }
 
-                // Damping prevents particles from accelerating forever.
+                if (touchActive) applyTouchToParticle(p, dt)
                 p.vx *= 0.992f
-                p.vy = p.vy.coerceIn(-100f, 180f)
-
+                p.vy = p.vy.coerceIn(-260f, 180f)
                 p.x += p.vx * dt
                 p.y += p.vy * dt
 
-                if (p.y > screenH + 8f || p.x < -15f || p.x > screenW + 15f) {
-                    val replacement = newParticle(randomY = false)
-                    p.x = if (p.x < 0f || p.x > screenW) {
-                        random.nextFloat() * screenW
-                    } else {
-                        p.x.coerceIn(0f, screenW.toFloat())
-                    }
-                    p.y = -random.nextFloat() * 30f
-                    p.vx = replacement.vx
-                    p.vy = replacement.vy
-                    p.size = replacement.size
-                    p.depth = replacement.depth
-                    p.phase = replacement.phase
-                    p.rotation = replacement.rotation
-                    p.rotationSpeed = replacement.rotationSpeed
-                }
-
-                drawSnowflake(canvas, p)
+                if (p.y > screenH + 10f || p.x < -18f || p.x > screenW + 18f) resetParticle(p)
+                drawFlake(canvas, p)
             }
 
-            // Small glow around the finger while interacting.
+            if (touchActive) disturbSnow()
+            drawSnowLayer(canvas)
+
             if (touchActive) {
                 paint.style = Paint.Style.STROKE
                 paint.strokeWidth = 1.5f
-                paint.color = if (holdAttract) {
-                    Color.argb(75, 110, 190, 255)
-                } else {
-                    Color.argb(55, 210, 235, 255)
-                }
-                canvas.drawCircle(touchX, touchY, screenW * 0.12f, paint)
+                paint.color = Color.argb(65, 205, 235, 255)
+                canvas.drawCircle(touchX, touchY, screenW * 0.105f, paint)
                 paint.style = Paint.Style.FILL
             }
         }
 
-        private fun drawSnowflake(canvas: Canvas, p: SnowParticle) {
-            val alpha = (105 + p.depth * 145).toInt().coerceIn(0, 250)
-            val blueTint = (235 + p.depth * 20).toInt().coerceIn(0, 255)
-            paint.style = Paint.Style.FILL
-            paint.color = Color.argb(alpha, 225, 238, blueTint)
+        private fun applyTouchToParticle(p: SnowParticle, dt: Float) {
+            val dx = p.x - touchX
+            val dy = p.y - touchY
+            val radius = screenW * 0.19f
+            val distance2 = dx * dx + dy * dy
+            if (distance2 >= radius * radius || distance2 < 1f) return
+            val distance = sqrt(distance2)
+            val force = (1f - distance / radius).coerceIn(0f, 1f)
+            p.vx += (dx / distance * 190f + touchVX * 0.22f) * force * dt
+            // Upward finger movement gives the flakes an extra upward toss.
+            val lift = if (touchVY < -80f) 1.7f else 1f
+            p.vy += (dy / distance * 170f - 250f * lift) * force * dt
+        }
 
-            // Tiny distant flakes are dots; closer flakes have a crystal-like cross.
+        private fun addSnow(x: Float, y: Float, amount: Float) {
+            val cx = (x / cellSize).toInt().coerceIn(0, columns - 1)
+            val cy = (y / cellSize).toInt().coerceIn(0, rows - 1)
+            val index = cy * columns + cx
+            snow[index] = (snow[index] + amount).coerceAtMost(1f)
+        }
+
+        private fun drawSnowLayer(canvas: Canvas) {
+            for (index in snow.indices) {
+                val density = snow[index]
+                if (density < 0.035f) continue
+                val cx = index % columns
+                val cy = index / columns
+                val x = cx * cellSize + cellSize * 0.5f
+                val y = cy * cellSize + cellSize * 0.5f
+                val alpha = (density * 205f).toInt().coerceIn(8, 205)
+                paint.style = Paint.Style.FILL
+                paint.color = Color.argb(alpha, 225, 239, 250)
+                val radius = cellSize * (0.25f + density * 0.30f)
+                canvas.drawCircle(x, y, radius, paint)
+                if (density > 0.35f) {
+                    paint.color = Color.argb((alpha * 0.38f).toInt(), 255, 255, 255)
+                    canvas.drawCircle(x - radius * 0.22f, y - radius * 0.25f, radius * 0.32f, paint)
+                }
+            }
+        }
+
+        private fun disturbSnow() {
+            val radius = screenW * 0.16f
+            val minX = ((touchX - radius) / cellSize).toInt().coerceIn(0, columns - 1)
+            val maxX = ((touchX + radius) / cellSize).toInt().coerceIn(0, columns - 1)
+            val minY = ((touchY - radius) / cellSize).toInt().coerceIn(0, rows - 1)
+            val maxY = ((touchY + radius) / cellSize).toInt().coerceIn(0, rows - 1)
+
+            for (cy in minY..maxY) for (cx in minX..maxX) {
+                val x = cx * cellSize + cellSize * 0.5f
+                val y = cy * cellSize + cellSize * 0.5f
+                val dx = x - touchX
+                val dy = y - touchY
+                val distance = sqrt(dx * dx + dy * dy)
+                if (distance >= radius) continue
+
+                val index = cy * columns + cx
+                val amount = snow[index]
+                if (amount < 0.045f) continue
+
+                val strength = (1f - distance / radius).coerceIn(0f, 1f)
+                val removed = minOf(amount, 0.12f + strength * 0.22f)
+                snow[index] -= removed
+
+                if (particles.size < MAX_PARTICLES && random.nextFloat() < removed * 2.8f) {
+                    val angle = random.nextFloat() * PI.toFloat() * 2f
+                    val fling = 90f + strength * 300f
+                    particles.add(
+                        SnowParticle(
+                            x = x,
+                            y = y,
+                            vx = cos(angle) * fling + touchVX * 0.25f,
+                            vy = -fling - kotlin.math.abs(touchVY).coerceAtMost(900f) * 0.18f,
+                            size = 1.2f + random.nextFloat() * 2.4f,
+                            depth = random.nextFloat(),
+                            phase = random.nextFloat() * PI.toFloat() * 2f,
+                            rotation = random.nextFloat() * 360f,
+                            rotationSpeed = (random.nextFloat() - 0.5f) * 180f,
+                            depositClock = 0f
+                        )
+                    )
+                }
+            }
+        }
+
+        private fun resetParticle(p: SnowParticle) {
+            val replacement = newParticle(false)
+            p.x = random.nextFloat() * screenW
+            p.y = -random.nextFloat() * 25f
+            p.vx = replacement.vx
+            p.vy = replacement.vy
+            p.size = replacement.size
+            p.depth = replacement.depth
+            p.phase = replacement.phase
+            p.rotation = replacement.rotation
+            p.rotationSpeed = replacement.rotationSpeed
+            p.depositClock = replacement.depositClock
+        }
+
+        private fun drawFlake(canvas: Canvas, p: SnowParticle) {
+            val alpha = (105 + p.depth * 145).toInt().coerceIn(0, 250)
+            paint.style = Paint.Style.FILL
+            paint.color = Color.argb(alpha, 232, 242, 255)
             canvas.drawCircle(p.x, p.y, p.size, paint)
 
             if (p.size > 2.1f) {
                 paint.style = Paint.Style.STROKE
                 paint.strokeWidth = 0.8f + p.depth * 0.5f
                 paint.color = Color.argb(alpha / 2, 245, 250, 255)
-
-                val r = p.size * 2.0f
-                val a = p.rotation * (PI.toFloat() / 180f)
+                val r = p.size * 2f
+                val angle = p.rotation * (PI.toFloat() / 180f)
                 for (i in 0..2) {
-                    val angle = a + i * (PI.toFloat() / 3f)
-                    val dx = cos(angle) * r
-                    val dy = sin(angle) * r
+                    val a = angle + i * (PI.toFloat() / 3f)
+                    val dx = cos(a) * r
+                    val dy = sin(a) * r
                     canvas.drawLine(p.x - dx, p.y - dy, p.x + dx, p.y + dy, paint)
                 }
                 paint.style = Paint.Style.FILL
@@ -302,13 +347,17 @@ class SnowWallpaperService : WallpaperService() {
             var depth: Float,
             var phase: Float,
             var rotation: Float,
-            var rotationSpeed: Float
+            var rotationSpeed: Float,
+            var depositClock: Float
         )
     }
 
     companion object {
-        private const val PARTICLE_COUNT = 1500
+        private const val PARTICLE_COUNT = 1250
+        private const val MAX_PARTICLES = 1850
+        private const val CELL_SIZE = 18
+        private const val DEPOSIT_INTERVAL = 0.12f
+        private const val DEPOSIT_AMOUNT = 0.0035f
         private const val FRAME_DELAY_MS = 33L
-        private const val HOLD_TO_ATTRACT_MS = 450L
     }
 }
