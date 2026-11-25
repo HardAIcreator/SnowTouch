@@ -1,7 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:allowBackup="true"
-        android:label="Snow Touch"
+        android:icon="@drawable/ic_snowtouch"
+        android:roundIcon="@drawable/ic_snowtouch"
+        android:label="@string/app_name"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="false">
 
@@ -16,7 +18,7 @@
 
         <service
             android:name=".SnowWallpaperService"
-            android:label="Snow Touch"
+            android:label="@string/wallpaper_title"
             android:permission="android.permission.BIND_WALLPAPER"
             android:exported="true">
             <intent-filter>

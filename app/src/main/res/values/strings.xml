@@ -1,4 +1,5 @@
 <resources>
-    <string name="app_name">Snow Touch</string>
-    <string name="wallpaper_description">Interactive realistic snow live wallpaper</string>
+    <string name="app_name">SnowTouch</string>
+    <string name="wallpaper_title">SnowTouch — Новогодний снег</string>
+    <string name="wallpaper_description">Живые зимние обои: падающий снег, интерактивные сугробы и новогодняя ёлка</string>
 </resources>
